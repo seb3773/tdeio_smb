@@ -1,0 +1,8 @@
+[Desktop Entry]
+Comment=Windows Workgroup
+
+Icon=network_local
+Type=MimeType
+MimeType=application/x-smb-workgroup
+X-TDE-AutoEmbed=true
+X-TDE-IsAlso=inode/directory

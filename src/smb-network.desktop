@@ -1,0 +1,8 @@
+[Desktop Entry]
+Icon=network
+
+Name=Samba Shares
+
+Open=false
+Type=Link
+URL=smb:/

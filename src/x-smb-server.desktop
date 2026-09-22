@@ -1,0 +1,8 @@
+[Desktop Entry]
+Comment=Windows Server
+
+Icon=server
+Type=MimeType
+MimeType=application/x-smb-server
+X-TDE-AutoEmbed=true
+X-TDE-IsAlso=inode/directory

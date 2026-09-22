@@ -1,0 +1,12 @@
+[Protocol]
+exec=tdeio_smb
+protocol=smb
+input=none
+output=filesystem
+listing=Name,Type,Size,Date,Access,Owner,Group
+reading=true
+writing=true
+makedir=true
+deleting=true
+X-DocPath=tdeioslave/smb/index.html
+Icon=samba

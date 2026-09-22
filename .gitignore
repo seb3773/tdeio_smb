@@ -1,0 +1,19 @@
+# Build and package output
+build/
+dist/
+
+# Compiled objects & libraries
+*.o
+*.so
+*.a
+*.la
+
+# Packages and archives
+*.deb
+*.tar.gz
+
+# Editor / IDE artifacts
+*~
+*.swp
+.vscode/
+.idea/
