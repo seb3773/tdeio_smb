@@ -64,6 +64,34 @@ TQValueList<SMBDiscoveredHost> SMBDiscovery::discoverHosts(bool forceRefresh, in
     return result;
 }
 
+TQString SMBDiscovery::resolveHostName(const TQString &nameOrModel)
+{
+    if (nameOrModel.isEmpty()) return nameOrModel;
+
+    // If string is in format "Model (NETBIOS_NAME)", extract the name
+    int parenOpen = nameOrModel.findRev('(');
+    int parenClose = nameOrModel.findRev(')');
+    if (parenOpen != -1 && parenClose > parenOpen + 1) {
+        TQString inside = nameOrModel.mid(parenOpen + 1, parenClose - parenOpen - 1).stripWhiteSpace();
+        if (!inside.isEmpty()) {
+            return inside;
+        }
+    }
+
+    TQString upper = nameOrModel.upper().stripWhiteSpace();
+
+    for (TQValueList<SMBDiscoveredHost>::ConstIterator it = s_cachedHosts.begin(); it != s_cachedHosts.end(); ++it) {
+        if ((*it).name.upper() == upper) {
+            return (*it).name;
+        }
+        if (!(*it).modelName.isEmpty() && (*it).modelName.upper() == upper) {
+            return (*it).name;
+        }
+    }
+
+    return nameOrModel;
+}
+
 void SMBDiscovery::discoverAvahi(TQMap<TQString, SMBDiscoveredHost> &hosts)
 {
     FILE *fp = popen("/usr/bin/avahi-browse -t -r -p _smb._tcp 2>/dev/null", "r");
@@ -319,12 +347,14 @@ void SMBDiscovery::discoverNetbiosAndWSD(TQMap<TQString, SMBDiscoveredHost> &hos
                         h.name = upperHost;
                         h.ip = ip;
                         h.workgroup = wgName;
-                        if (upperHost.startsWith("BRN") || upperHost.startsWith("KM") ||
-                            upperHost.startsWith("CANON") || upperHost.startsWith("NPI") ||
-                            upperHost.startsWith("HP") || upperHost.startsWith("ET") ||
-                            upperHost.startsWith("EPSON") || upperHost.startsWith("RICOH") ||
-                            upperHost.startsWith("XEROX") || upperHost.startsWith("LEXMARK") ||
-                            upperHost.startsWith("SHARP") || upperHost.startsWith("OKI")) {
+                        if (upperHost.startsWith("BRN") || upperHost.startsWith("BRW") ||
+                            upperHost.startsWith("KM") || upperHost.startsWith("CANON") ||
+                            upperHost.startsWith("NPI") || upperHost.startsWith("HP") ||
+                            upperHost.startsWith("ET") || upperHost.startsWith("EPSON") ||
+                            upperHost.startsWith("RICOH") || upperHost.startsWith("XEROX") ||
+                            upperHost.startsWith("LEXMARK") || upperHost.startsWith("SHARP") ||
+                            upperHost.startsWith("OKI") || upperHost.startsWith("KONICA") ||
+                            upperHost.startsWith("MINOLTA") || upperHost.startsWith("KYOCERA")) {
                             h.isPrinter = true;
                             h.comment = "Printer";
                         }
@@ -345,106 +375,43 @@ void SMBDiscovery::discoverNetbiosAndWSD(TQMap<TQString, SMBDiscoveredHost> &hos
 }
 
 // ---------------------------------------------------------------------------
-// Lightweight SNMP query (SNMPv1 GET) to retrieve printer model names.
+// Lightweight SNMP query (SNMPv1 GETNEXT) to retrieve printer model names.
 // Uses non-blocking UDP sockets + poll() to query all printers in parallel (~300ms).
-// OID: hrDeviceDescr = 1.3.6.1.2.1.25.3.2.1.3.1
-// Fallback: sysDescr  = 1.3.6.1.2.1.1.1.0
+// OID: hrDeviceDescr = 1.3.6.1.2.1.25.3.2.1.3
+// Fallback: sysDescr  = 1.3.6.1.2.1.1.1
 // ---------------------------------------------------------------------------
 
-// Encodes an OID into BER/DER format
-static int encodeOID(const int *oid, int oidLen, unsigned char *out, int maxLen) {
-    int pos = 0;
-    if (oidLen < 2 || pos >= maxLen) return 0;
-    out[pos++] = (unsigned char)(40 * oid[0] + oid[1]);
-    for (int i = 2; i < oidLen; i++) {
-        int val = oid[i];
-        if (val < 128) {
-            if (pos >= maxLen) return 0;
-            out[pos++] = (unsigned char)val;
-        } else {
-            // Multi-byte BER encoding
-            unsigned char enc[5];
-            int encLen = 0;
-            while (val > 0) {
-                enc[encLen++] = val & 0x7F;
-                val >>= 7;
-            }
-            for (int j = encLen - 1; j >= 0; j--) {
-                if (pos >= maxLen) return 0;
-                out[pos++] = enc[j] | (j > 0 ? 0x80 : 0x00);
-            }
-        }
-    }
-    return pos;
-}
+// Static SNMPv1 GETNEXT request for hrDeviceDescr (1.3.6.1.2.1.25.3.2.1.3)
+static const unsigned char SNMP_GETNEXT_HRDEVICE[42] = {
+    0x30, 0x28,                         // SEQUENCE (40 bytes)
+    0x02, 0x01, 0x00,                   // INTEGER version 0 (SNMPv1)
+    0x04, 0x06, 'p', 'u', 'b', 'l', 'i', 'c', // STRING "public"
+    0xa1, 0x1b,                         // GetNextRequest (27 bytes)
+    0x02, 0x01, 0x01,                   // request-id 1
+    0x02, 0x01, 0x00,                   // error-status 0
+    0x02, 0x01, 0x00,                   // error-index 0
+    0x30, 0x10,                         // VarBindList (16 bytes)
+    0x30, 0x0e,                         // VarBind (14 bytes)
+    0x06, 0x0a,                         // OID (10 bytes)
+    0x2b, 0x06, 0x01, 0x02, 0x01, 0x19, 0x03, 0x02, 0x01, 0x03, // 1.3.6.1.2.1.25.3.2.1.3
+    0x05, 0x00                          // NULL
+};
 
-// Builds an SNMPv1 GET Request packet
-static int buildSNMPGet(const int *oid, int oidLen, unsigned char *pkt, int maxPkt) {
-    // Community = "public"
-    static const unsigned char community[] = "public";
-    int commLen = 6;
-
-    // Encode OID
-    unsigned char oidBytes[64];
-    int oidBytesLen = encodeOID(oid, oidLen, oidBytes, sizeof(oidBytes));
-    if (oidBytesLen == 0) return 0;
-
-    // Bottom-up construction:
-    // OID TLV
-    unsigned char oidTLV[70];
-    oidTLV[0] = 0x06; oidTLV[1] = (unsigned char)oidBytesLen;
-    memcpy(oidTLV + 2, oidBytes, oidBytesLen);
-    int oidTLVLen = 2 + oidBytesLen;
-
-    // Null value: 05 00
-    // VarBind = SEQUENCE { OID, NULL }
-    int varbindContentLen = oidTLVLen + 2; // +2 for null TLV
-    unsigned char varbind[80];
-    varbind[0] = 0x30; varbind[1] = (unsigned char)varbindContentLen;
-    memcpy(varbind + 2, oidTLV, oidTLVLen);
-    varbind[2 + oidTLVLen] = 0x05; varbind[2 + oidTLVLen + 1] = 0x00;
-    int varbindLen = 2 + varbindContentLen;
-
-    // VarBindList = SEQUENCE { VarBind }
-    unsigned char varbindList[90];
-    varbindList[0] = 0x30; varbindList[1] = (unsigned char)varbindLen;
-    memcpy(varbindList + 2, varbind, varbindLen);
-    int varbindListLen = 2 + varbindLen;
-
-    // PDU: GetRequest (0xA0) { request-id, error-status, error-index, varbindlist }
-    unsigned char reqId[] = { 0x02, 0x01, 0x01 }; // INTEGER 1
-    unsigned char errSt[] = { 0x02, 0x01, 0x00 }; // INTEGER 0
-    unsigned char errIx[] = { 0x02, 0x01, 0x00 }; // INTEGER 0
-    int pduContentLen = 3 + 3 + 3 + varbindListLen;
-    if (2 + pduContentLen > maxPkt) return 0;
-
-    unsigned char pdu[120];
-    pdu[0] = 0xA0; pdu[1] = (unsigned char)pduContentLen;
-    int p = 2;
-    memcpy(pdu + p, reqId, 3); p += 3;
-    memcpy(pdu + p, errSt, 3); p += 3;
-    memcpy(pdu + p, errIx, 3); p += 3;
-    memcpy(pdu + p, varbindList, varbindListLen); p += varbindListLen;
-    int pduLen = p;
-
-    // Message = SEQUENCE { version, community, pdu }
-    unsigned char version[] = { 0x02, 0x01, 0x00 }; // SNMPv1
-    unsigned char commTLV[20];
-    commTLV[0] = 0x04; commTLV[1] = (unsigned char)commLen;
-    memcpy(commTLV + 2, community, commLen);
-    int commTLVLen = 2 + commLen;
-
-    int msgContentLen = 3 + commTLVLen + pduLen;
-    if (2 + msgContentLen > maxPkt) return 0;
-
-    pkt[0] = 0x30; pkt[1] = (unsigned char)msgContentLen;
-    int pp = 2;
-    memcpy(pkt + pp, version, 3); pp += 3;
-    memcpy(pkt + pp, commTLV, commTLVLen); pp += commTLVLen;
-    memcpy(pkt + pp, pdu, pduLen); pp += pduLen;
-
-    return pp;
-}
+// Static SNMPv1 GETNEXT request for sysDescr (1.3.6.1.2.1.1.1)
+static const unsigned char SNMP_GETNEXT_SYSDESCR[40] = {
+    0x30, 0x26,                         // SEQUENCE (38 bytes)
+    0x02, 0x01, 0x00,                   // INTEGER version 0 (SNMPv1)
+    0x04, 0x06, 'p', 'u', 'b', 'l', 'i', 'c', // STRING "public"
+    0xa1, 0x19,                         // GetNextRequest (25 bytes)
+    0x02, 0x01, 0x01,                   // request-id 1
+    0x02, 0x01, 0x00,                   // error-status 0
+    0x02, 0x01, 0x00,                   // error-index 0
+    0x30, 0x0e,                         // VarBindList (14 bytes)
+    0x30, 0x0c,                         // VarBind (12 bytes)
+    0x06, 0x08,                         // OID (8 bytes)
+    0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x01, // 1.3.6.1.2.1.1.1
+    0x05, 0x00                          // NULL
+};
 
 // Extract string value from an SNMP response
 static TQString parseSNMPStringResponse(const unsigned char *data, int len) {
@@ -483,31 +450,19 @@ void SMBDiscovery::queryPrinterModelsSNMP(TQMap<TQString, SMBDiscoveredHost> &ho
 
     kdDebug(TDEIO_SMB) << "SMBDiscovery [SNMP]: querying " << queries.count() << " printers for model names" << endl;
 
-    // OID hrDeviceDescr = 1.3.6.1.2.1.25.3.2.1.3.1
-    static const int oid_hrDevice[] = { 1, 3, 6, 1, 2, 1, 25, 3, 2, 1, 3, 1 };
-    // OID sysDescr = 1.3.6.1.2.1.1.1.0 (fallback)
-    static const int oid_sysDescr[] = { 1, 3, 6, 1, 2, 1, 1, 1, 0 };
-
-    unsigned char pkt1[128];
-    int pkt1Len = buildSNMPGet(oid_hrDevice, 12, pkt1, sizeof(pkt1));
-
-    unsigned char pkt2[128];
-    int pkt2Len = buildSNMPGet(oid_sysDescr, 9, pkt2, sizeof(pkt2));
-
-    if (pkt1Len == 0 || pkt2Len == 0) return;
-
     // Single UDP socket for all queries
     int snmp_sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (snmp_sock < 0) return;
 
-    // Send hrDeviceDescr requests to all printers
+    // Send hrDeviceDescr GETNEXT requests to all printers
     for (TQValueList<PrinterQuery>::Iterator it = queries.begin(); it != queries.end(); ++it) {
         struct sockaddr_in dest;
         memset(&dest, 0, sizeof(dest));
         dest.sin_family = AF_INET;
         dest.sin_port = htons(161);
         inet_pton(AF_INET, (*it).ip.latin1(), &dest.sin_addr);
-        sendto(snmp_sock, pkt1, pkt1Len, 0, (struct sockaddr*)&dest, sizeof(dest));
+        sendto(snmp_sock, SNMP_GETNEXT_HRDEVICE, sizeof(SNMP_GETNEXT_HRDEVICE), 0,
+               (struct sockaddr*)&dest, sizeof(dest));
     }
 
     // Receive responses with poll() (timeout 400ms)
@@ -556,7 +511,7 @@ void SMBDiscovery::queryPrinterModelsSNMP(TQMap<TQString, SMBDiscoveredHost> &ho
         }
     }
 
-    // Phase 2: Send sysDescr for printers that did not reply to hrDeviceDescr
+    // Phase 2: Send sysDescr GETNEXT for printers that did not reply to hrDeviceDescr
     bool needFallback = false;
     for (TQValueList<PrinterQuery>::Iterator it = queries.begin(); it != queries.end(); ++it) {
         if (!(*it).gotModel) {
@@ -565,7 +520,8 @@ void SMBDiscovery::queryPrinterModelsSNMP(TQMap<TQString, SMBDiscoveredHost> &ho
             dest.sin_family = AF_INET;
             dest.sin_port = htons(161);
             inet_pton(AF_INET, (*it).ip.latin1(), &dest.sin_addr);
-            sendto(snmp_sock, pkt2, pkt2Len, 0, (struct sockaddr*)&dest, sizeof(dest));
+            sendto(snmp_sock, SNMP_GETNEXT_SYSDESCR, sizeof(SNMP_GETNEXT_SYSDESCR), 0,
+                   (struct sockaddr*)&dest, sizeof(dest));
             needFallback = true;
         }
     }

@@ -230,6 +230,14 @@ KURL SMBSlave::checkURL(const KURL& kurl) const
     if (url.path().isEmpty())
         url.setPath("/");
 
+    // If host matches a printer model name or display name, resolve it to NetBIOS name
+    if (!url.host().isEmpty()) {
+        TQString resolved = SMBDiscovery::resolveHostName(url.host());
+        if (!resolved.isEmpty() && resolved != url.host()) {
+            url.setHost(resolved);
+        }
+    }
+
     kdDebug(TDEIO_SMB) << "checkURL return3 " << url << endl;
     return url;
 }
@@ -330,77 +338,95 @@ void SMBSlave::listDir( const KURL& kurl )
 
    m_current_url = kurl;
 
-   // Modern discovery for entire network (smb:/) using WSDD + Avahi
-   if (m_current_url.getType() == SMBURLTYPE_ENTIRE_NETWORK)
-   {
-       kdDebug(TDEIO_SMB) << "SMBSlave::listDir: SMBURLTYPE_ENTIRE_NETWORK -> modern discovery" << endl;
-       TQValueList<SMBDiscoveredHost> hosts = SMBDiscovery::discoverHosts(false);
+    // Modern discovery for entire network (smb:/) using WSDD + Avahi
+    if (m_current_url.getType() == SMBURLTYPE_ENTIRE_NETWORK)
+    {
+        kdDebug(TDEIO_SMB) << "SMBSlave::listDir: SMBURLTYPE_ENTIRE_NETWORK -> modern discovery" << endl;
+        TQValueList<SMBDiscoveredHost> hosts = SMBDiscovery::discoverHosts(false);
 
-       UDSEntry udsentry;
-       UDSAtom atom;
+        // Count printer models to detect duplicate model names and disambiguate them
+        TQMap<TQString, int> modelCounts;
+        for (TQValueList<SMBDiscoveredHost>::ConstIterator it = hosts.begin(); it != hosts.end(); ++it) {
+            if ((*it).isPrinter && !(*it).modelName.isEmpty()) {
+                modelCounts[(*it).modelName] = modelCounts[(*it).modelName] + 1;
+            }
+        }
 
-       for (TQValueList<SMBDiscoveredHost>::ConstIterator it = hosts.begin(); it != hosts.end(); ++it) {
-           udsentry.clear();
+        UDSEntry udsentry;
+        UDSAtom atom;
 
-           atom.m_uds = TDEIO::UDS_NAME;
-           atom.m_str = (*it).name;
-           udsentry.append(atom);
+        for (TQValueList<SMBDiscoveredHost>::ConstIterator it = hosts.begin(); it != hosts.end(); ++it) {
+            udsentry.clear();
 
-           atom.m_uds = TDEIO::UDS_FILE_TYPE;
-           atom.m_long = S_IFDIR;
-           udsentry.append(atom);
+            TQString displayName;
+            if ((*it).isPrinter && !(*it).modelName.isEmpty()) {
+                if (modelCounts[(*it).modelName] > 1) {
+                    displayName = (*it).modelName + " (" + (*it).name + ")";
+                } else {
+                    displayName = (*it).modelName;
+                }
+            } else {
+                displayName = (*it).name;
+            }
 
-           atom.m_uds = TDEIO::UDS_ACCESS;
-           atom.m_long = (S_IRUSR | S_IRGRP | S_IROTH | S_IXUSR | S_IXGRP | S_IXOTH);
-           udsentry.append(atom);
+            atom.m_uds = TDEIO::UDS_NAME;
+            atom.m_str = displayName;
+            udsentry.append(atom);
 
-           atom.m_uds = TDEIO::UDS_MIME_TYPE;
-           if ((*it).isPrinter) {
-               atom.m_str = TQString::fromLatin1("print/printer");
-           } else {
-               atom.m_str = TQString::fromLatin1("application/x-smb-server");
-           }
-           udsentry.append(atom);
+            atom.m_uds = TDEIO::UDS_FILE_TYPE;
+            atom.m_long = S_IFDIR;
+            udsentry.append(atom);
 
-           // Comment displayed under name in Konqueror
-           TQString extra;
-           if ((*it).isPrinter && !(*it).modelName.isEmpty()) {
-               // Display SNMP printer model name
-               extra = (*it).modelName;
-               if (!(*it).workgroup.isEmpty()) {
-                   extra += " [" + (*it).workgroup + "]";
-               }
-           } else {
-               if (!(*it).workgroup.isEmpty()) {
-                   extra = (*it).workgroup;
-               }
-               if (!(*it).comment.isEmpty()) {
-                   if (!extra.isEmpty()) extra += " - ";
-                   extra += (*it).comment;
-               }
-           }
-           if (!extra.isEmpty()) {
-               atom.m_uds = TDEIO::UDS_EXTRA;
-               atom.m_str = extra;
-               udsentry.append(atom);
-           }
+            atom.m_uds = TDEIO::UDS_ACCESS;
+            atom.m_long = (S_IRUSR | S_IRGRP | S_IROTH | S_IXUSR | S_IXGRP | S_IXOTH);
+            udsentry.append(atom);
 
-           atom.m_uds = TDEIO::UDS_URL;
-           KURL u;
-           u.setProtocol("smb");
-           u.setHost((*it).name);
-           u.setPath("/");
-           atom.m_str = u.url();
-           udsentry.append(atom);
+            atom.m_uds = TDEIO::UDS_MIME_TYPE;
+            if ((*it).isPrinter) {
+                atom.m_str = TQString::fromLatin1("print/printer");
+            } else {
+                atom.m_str = TQString::fromLatin1("application/x-smb-server");
+            }
+            udsentry.append(atom);
 
-           listEntry(udsentry, false);
-       }
+            // Comment displayed under name in Konqueror
+            TQString extra;
+            if ((*it).isPrinter) {
+                extra = (*it).name;
+                if (!(*it).workgroup.isEmpty()) {
+                    extra += " [" + (*it).workgroup + "]";
+                }
+            } else {
+                if (!(*it).workgroup.isEmpty()) {
+                    extra = (*it).workgroup;
+                }
+                if (!(*it).comment.isEmpty()) {
+                    if (!extra.isEmpty()) extra += " - ";
+                    extra += (*it).comment;
+                }
+            }
+            if (!extra.isEmpty()) {
+                atom.m_uds = TDEIO::UDS_EXTRA;
+                atom.m_str = extra;
+                udsentry.append(atom);
+            }
 
-       udsentry.clear();
-       listEntry(udsentry, true);
-       finished();
-       return;
-   }
+            atom.m_uds = TDEIO::UDS_URL;
+            KURL u;
+            u.setProtocol("smb");
+            u.setHost((*it).name);
+            u.setPath("/");
+            atom.m_str = u.url();
+            udsentry.append(atom);
+
+            listEntry(udsentry, false);
+        }
+
+        udsentry.clear();
+        listEntry(udsentry, true);
+        finished();
+        return;
+    }
 
    int                 dirfd;
    struct smbc_dirent  *dirp = NULL;

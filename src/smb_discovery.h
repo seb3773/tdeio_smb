@@ -23,6 +23,9 @@ public:
     // Uses a 20-second cache to avoid latency when navigating back and forth in Konqueror.
     static TQValueList<SMBDiscoveredHost> discoverHosts(bool forceRefresh = false, int timeoutMs = 1500);
 
+    // Resolves a display name, model name, or NetBIOS name to the canonical host/IP
+    static TQString resolveHostName(const TQString &nameOrModel);
+
 private:
     static void discoverAvahi(TQMap<TQString, SMBDiscoveredHost> &hosts);
     static void discoverNetbiosAndWSD(TQMap<TQString, SMBDiscoveredHost> &hosts, int timeoutMs);
